@@ -7,6 +7,7 @@ import EventBus from "./eventBus";
 import ExtensionAvailability from "./extension/availability";
 import ExtensionBind from "./extension/bind";
 import ExtensionGroupBindEnforcement from "./extension/groupBindEnforcement";
+import ExtensionSmartBulbMode from "./extension/smartBulbMode";
 import ExtensionBridge from "./extension/bridge";
 import ExtensionConfigure from "./extension/configure";
 import type Extension from "./extension/extension";
@@ -75,6 +76,7 @@ export class Controller {
             new ExtensionGroups(...this.extensionArgs),
             new ExtensionBind(...this.extensionArgs),
             new ExtensionGroupBindEnforcement(...this.extensionArgs),
+            new ExtensionSmartBulbMode(...this.extensionArgs),
             new ExtensionOTAUpdate(...this.extensionArgs),
             new ExtensionExternalExtensions(...this.extensionArgs),
             new ExtensionAvailability(...this.extensionArgs),
