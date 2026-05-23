@@ -81,12 +81,13 @@ describe("Extension: GroupBindEnforcement", () => {
         expect(mockLogger.info).not.toHaveBeenCalledWith(expect.stringContaining("Starting poll loop"));
     });
 
-    it("Should ingest groups on first run (Capture strategy)", async () => {
+    it("Should ingest groups on first run when unexpected=accept", async () => {
         const device = devices.bulb_color;
         const group = groups.group_1;
         group.members.push(device.getEndpoint(1)!);
 
         settings.set(["advanced", "group_bind_cooldown"], 10);
+        settings.set(["advanced", "group_bind_unexpected"], "accept");
         const deviceConfig = settings.getDevice(device.ieeeAddr)!;
         delete (deviceConfig as any).groups;
 
@@ -98,7 +99,7 @@ describe("Extension: GroupBindEnforcement", () => {
         expect(settings.getDevice(device.ieeeAddr)!.groups).toContain("group_1");
     });
 
-    it("Should ingest bindings on first run (Capture strategy)", async () => {
+    it("Should ingest bindings on first run when unexpected=accept", async () => {
         const device = devices.bulb;
         const target = devices.bulb_color;
         const targetEndpoint = target.getEndpoint(1)!;
@@ -111,6 +112,7 @@ describe("Extension: GroupBindEnforcement", () => {
         device.getEndpoint(1)!.binds = [binding as any];
 
         settings.set(["advanced", "group_bind_cooldown"], 10);
+        settings.set(["advanced", "group_bind_unexpected"], "accept");
         const deviceConfig = settings.getDevice(device.ieeeAddr)!;
         delete (deviceConfig as any).binds;
 
@@ -126,6 +128,52 @@ describe("Extension: GroupBindEnforcement", () => {
             to_endpoint: 1,
             from_endpoint: 1,
         });
+    });
+
+    it("Should remove device-side groups when undefined in config + unexpected=enforce", async () => {
+        // Operator removed `groups:` from a previously-managed device and
+        // set strategy to enforce. The extension must treat undefined as
+        // explicitly empty and remove the runtime memberships — NOT fall
+        // back to first-run ingestion.
+        const device = devices.bulb_color;
+        const group = groups.group_1;
+        group.members.push(device.getEndpoint(1)!);
+
+        settings.set(["advanced", "group_bind_cooldown"], 10);
+        settings.set(["advanced", "group_bind_unexpected"], "enforce");
+        const deviceConfig = settings.getDevice(device.ieeeAddr)!;
+        delete (deviceConfig as any).groups;
+
+        const ext = Array.from(controller.extensions).find((e) => e.constructor.name.includes("GroupBindEnforcement")) as any;
+        await ext.poll();
+        await flushPromises();
+
+        expect(mockLogger.info).not.toHaveBeenCalledWith(expect.stringContaining("ingesting group"));
+        expect(mockLogger.warning).toHaveBeenCalledWith(expect.stringContaining("in unexpected group"));
+    });
+
+    it("Should remove device-side binds when undefined in config + unexpected=enforce", async () => {
+        const device = devices.bulb;
+        const target = devices.bulb_color;
+        const targetEndpoint = target.getEndpoint(1)!;
+        const binding = {
+            cluster: {name: "genOnOff"},
+            target: targetEndpoint,
+        };
+        device.bindingTable.mockResolvedValue([]);
+        device.getEndpoint(1)!.binds = [binding as any];
+
+        settings.set(["advanced", "group_bind_cooldown"], 10);
+        settings.set(["advanced", "group_bind_unexpected"], "enforce");
+        const deviceConfig = settings.getDevice(device.ieeeAddr)!;
+        delete (deviceConfig as any).binds;
+
+        const ext = Array.from(controller.extensions).find((e) => e.constructor.name.includes("GroupBindEnforcement")) as any;
+        await ext.poll();
+        await flushPromises();
+
+        expect(mockLogger.info).not.toHaveBeenCalledWith(expect.stringContaining("ingesting bind"));
+        expect(mockLogger.warning).toHaveBeenCalledWith(expect.stringContaining("unexpected binding"));
     });
 
     // --- group_bind_missing tests ---
