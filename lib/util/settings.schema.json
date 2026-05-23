@@ -820,14 +820,14 @@
                     "type": "string",
                     "enum": ["report", "accept", "enforce"],
                     "title": "Group/Bind Enforcement unexpected items",
-                    "description": "What to do when a group/binding exists on a device but not in config. 'report' = record as drift for user resolution, 'accept' = add to config, 'enforce' = remove from device.",
+                    "description": "What to do when a group/binding exists on a device but not in config: 'report' = record as drift for user resolution, 'accept' = add to config (first-run capture: an omitted groups/binds key on a device triggers ingesting current runtime state), 'enforce' = remove from device (omitted groups/binds is treated as explicitly empty, so every runtime entry is unexpected and gets pruned).",
                     "default": "report"
                 },
                 "group_bind_missing": {
                     "type": "string",
                     "enum": ["report", "accept", "enforce"],
                     "title": "Group/Bind Enforcement missing items",
-                    "description": "What to do when a group/binding is in config but missing from device. 'report' = record as drift for user resolution, 'accept' = remove from config, 'enforce' = push to device.",
+                    "description": "What to do when a group/binding is in config but missing from device: 'report' = record as drift for user resolution, 'accept' = remove from config (devices runtime state wins), 'enforce' = push to device (config wins).",
                     "default": "report"
                 },
                 "group_bind_throttle": {
