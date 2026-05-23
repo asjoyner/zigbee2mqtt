@@ -237,9 +237,12 @@ export default class GroupBindEnforcement extends Extension {
                 const result = (await endpoint.command("genGroups", "getMembership", {groupcount: 0, grouplist: []})) as GetMembershipResponse;
                 const actualGroupIDs: number[] = Array.isArray(result?.grouplist) ? result.grouplist : [];
 
-                if (device.options.groups === undefined) {
-                    // Batch all ingestion writes for this endpoint into one
-                    // file write rather than one per group.
+                if (device.options.groups === undefined && unexpectedStrategy === "accept") {
+                    // First-run ingestion only happens when the operator
+                    // has asked us to accept device state. Under "enforce",
+                    // undefined falls through with expected=[] so the
+                    // device's runtime groups are all flagged unexpected and
+                    // removed. Under "report", they're recorded as drift.
                     settings.mutateBatched(() => {
                         for (const groupID of actualGroupIDs) {
                             const group = this.zigbee.groupByID(groupID);
@@ -421,10 +424,11 @@ export default class GroupBindEnforcement extends Extension {
             // Filter out Coordinator-target bindings — those are managed by the configure extension
             const userBinds = actualBinds.filter((b) => !this.isCoordinatorTarget(b.target));
 
-            if (device.options.binds === undefined) {
-                // Batch all first-run binds ingestion for this endpoint into
-                // a single YAML write. For a 145-device network this cuts
-                // hundreds of disk writes per poll down to a few.
+            if (device.options.binds === undefined && unexpectedStrategy === "accept") {
+                // See the matching guard in syncDeviceGroups: ingest only
+                // when strategy is "accept". Under "enforce" / "report",
+                // undefined falls through with expected=[] so each runtime
+                // bind is treated as unexpected.
                 settings.mutateBatched(() => {
                     for (const bind of userBinds) {
                         const target = utils.isZHEndpoint(bind.target)
