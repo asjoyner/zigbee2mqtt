@@ -980,6 +980,17 @@
                 "friendly_name": {
                     "type": "string"
                 },
+                "controlling_switch": {
+                    "type": ["string", "number"],
+                    "title": "Controlling switch",
+                    "description": "ieee_address or friendly_name of the device whose smartBulbMode attribute and relay state are managed for this group. Required to use smart_bulb_mode."
+                },
+                "smart_bulb_mode": {
+                    "type": "boolean",
+                    "title": "Smart bulb mode",
+                    "description": "When true, smartBulbMode is enabled on the controlling switch and its relay is held closed so the bulb group stays energized and reachable over Zigbee. When false, the controlling switch acts as a normal relay-cutting load switch. Reconciled on the same cadence as group/bind enforcement.",
+                    "default": false
+                },
                 "retain": {
                     "type": "boolean"
                 },

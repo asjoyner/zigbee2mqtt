@@ -103,6 +103,19 @@ export interface Zigbee2MQTTGroupOptions {
     friendly_name: string;
     description?: string;
     qos?: 0 | 1 | 2;
+    /**
+     * ieee_address or friendly_name of the device whose smartBulbMode
+     * attribute and relay state are managed for this group. Required to
+     * use smart_bulb_mode.
+     */
+    controlling_switch?: string | number;
+    /**
+     * When true, smartBulbMode is enabled on the controlling switch and its
+     * relay is held closed so the bulb group stays energized and
+     * Zigbee-reachable. When false, the controlling switch acts as a normal
+     * load switch.
+     */
+    smart_bulb_mode?: boolean;
 }
 
 export interface Zigbee2MQTTSettings {
