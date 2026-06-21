@@ -1,5 +1,5 @@
 // biome-ignore assist/source/organizeImports: import mocks first
-import {afterAll, beforeAll, beforeEach, describe, expect, it, vi} from "vitest";
+import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest";
 import * as data from "../mocks/data";
 import {mockLogger} from "../mocks/logger";
 import {flushPromises} from "../mocks/utils";
@@ -637,5 +637,44 @@ describe("Extension: GroupBindEnforcement", () => {
 
         expect(device.bindingTable).not.toHaveBeenCalled();
         expect(mockLogger.info).not.toHaveBeenCalledWith(expect.stringContaining("interviewed successfully"));
+    });
+
+    // --- default-endpoint scoping ---
+
+    describe("Default-endpoint scoping", () => {
+        // hue_twilight has genGroups on ep1 (default), ep11 and ep12.
+        beforeEach(() => {
+            returnDevices.push(devices.hue_twilight.ieeeAddr);
+        });
+        afterEach(() => {
+            const i = returnDevices.indexOf(devices.hue_twilight.ieeeAddr);
+            if (i !== -1) returnDevices.splice(i, 1);
+        });
+
+        it("Should only enforce group membership on the device's default endpoint", async () => {
+            const zh = devices.hue_twilight;
+            const secondaryEndpoint = zh.getEndpoint(11)!;
+            const group = groups.group_1;
+
+            settings.set(["advanced", "group_bind_cooldown"], 10);
+            settings.set(["advanced", "group_bind_unexpected"], "enforce");
+            settings.set(["advanced", "group_bind_missing"], "report");
+            settings.set(["devices", zh.ieeeAddr, "groups"], []);
+
+            // A *secondary* endpoint is in a group not in config; the default
+            // endpoint is in none. Per-endpoint enforcement would flag ep11 as
+            // an unexpected membership and remove it.
+            group.members.push(secondaryEndpoint);
+
+            const ext = Array.from(controller.extensions).find((e) => e.constructor.name.includes("GroupBindEnforcement")) as any;
+            await ext.poll();
+            await flushPromises();
+
+            // The secondary endpoint's membership is neither removed nor reported.
+            expect(mockLogger.warning).not.toHaveBeenCalledWith(expect.stringContaining("unexpected group"));
+            expect(group.members).toContain(secondaryEndpoint);
+            const modelDevice = controller.zigbee.resolveEntity(zh.ieeeAddr) as Device;
+            expect(modelDevice.drift).toBeUndefined();
+        });
     });
 });

@@ -88,7 +88,6 @@ export default class GroupBindEnforcement extends Extension {
         const interval = explicitCooldown && explicitCooldown > 0 ? explicitCooldown : GroupBindEnforcement.DEFAULT_POLL_INTERVAL;
         this.stats.poll_interval_min = interval;
 
-        this.eventBus.onGroupMembersChanged(this, this.onGroupMembersChanged);
         this.eventBus.onDeviceInterview(this, this.onDeviceInterview);
         logger.info(`Group/Bind Enforcement: Starting poll loop (interval: ${interval} min)`);
         await this.publishStats();
@@ -108,19 +107,6 @@ export default class GroupBindEnforcement extends Extension {
             this.pollTimer = undefined;
         }
         await super.stop();
-    }
-
-    @bind private async onGroupMembersChanged(data: eventdata.GroupMembersChanged): Promise<void> {
-        if (!this.pollTimer) return;
-
-        const device = this.zigbee.resolveEntity(data.endpoint.getDevice().ieeeAddr);
-        if (device && device instanceof Device) {
-            if (data.action === "add") {
-                settings.addGroupMember(device.ieeeAddr, data.group.name);
-            } else if (data.action === "remove") {
-                settings.removeGroupMember(device.ieeeAddr, data.group.name);
-            }
-        }
     }
 
     @bind private async onDeviceInterview(data: eventdata.DeviceInterview): Promise<void> {
@@ -221,9 +207,16 @@ export default class GroupBindEnforcement extends Extension {
         const unexpectedStrategy = settings.get().advanced.group_bind_unexpected ?? "report";
         const missingStrategy = settings.get().advanced.group_bind_missing ?? "report";
 
+        // Group membership in config is device-level, and z2m manages it on the
+        // device's default endpoint — the one group add/remove operations
+        // target. Enforce only that endpoint: comparing secondary endpoints
+        // (e.g. an Inovelli VZM31-SN's ep2/ep3) against device-level config
+        // produces phantom "missing from group" drift, and a stray membership
+        // there can't be represented in config anyway. The Groups-cluster guard
+        // also skips devices whose default endpoint lacks it.
+        const defaultEndpointID = device.endpoint("default")?.ID;
         for (const endpoint of device.zh.endpoints) {
-            // Skip endpoints that don't support the Groups cluster (e.g. GreenPower endpoint 242)
-            if (!endpoint.supportsInputCluster("genGroups")) {
+            if (endpoint.ID !== defaultEndpointID || !endpoint.supportsInputCluster("genGroups")) {
                 continue;
             }
 
