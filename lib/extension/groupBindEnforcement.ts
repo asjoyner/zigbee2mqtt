@@ -207,9 +207,16 @@ export default class GroupBindEnforcement extends Extension {
         const unexpectedStrategy = settings.get().advanced.group_bind_unexpected ?? "report";
         const missingStrategy = settings.get().advanced.group_bind_missing ?? "report";
 
+        // Group membership in config is device-level, and z2m manages it on the
+        // device's default endpoint — the one group add/remove operations
+        // target. Enforce only that endpoint: comparing secondary endpoints
+        // (e.g. an Inovelli VZM31-SN's ep2/ep3) against device-level config
+        // produces phantom "missing from group" drift, and a stray membership
+        // there can't be represented in config anyway. The Groups-cluster guard
+        // also skips devices whose default endpoint lacks it.
+        const defaultEndpointID = device.endpoint("default")?.ID;
         for (const endpoint of device.zh.endpoints) {
-            // Skip endpoints that don't support the Groups cluster (e.g. GreenPower endpoint 242)
-            if (!endpoint.supportsInputCluster("genGroups")) {
+            if (endpoint.ID !== defaultEndpointID || !endpoint.supportsInputCluster("genGroups")) {
                 continue;
             }
 

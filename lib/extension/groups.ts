@@ -310,18 +310,22 @@ export default class Groups extends Extension {
         // Persist membership to configuration.yaml so it survives a restart
         // and the group/bind enforcement poll, independent of whether
         // enforcement is enabled. Group membership in config is device-level
-        // (`devices.<ieee>.groups`), so we key on the device, not the
-        // endpoint — matching how the config schema and enforcement express
-        // membership.
-        settings.mutateBatched(() => {
-            for (const group of changedGroups) {
-                if (type === "add") {
-                    settings.addGroupMember(resolvedDevice.ieeeAddr, group.name);
-                } else {
-                    settings.removeGroupMember(resolvedDevice.ieeeAddr, group.name);
+        // (`devices.<ieee>.groups`), so we key on the device, not the endpoint —
+        // matching how the config schema and enforcement express membership.
+        // Only mirror changes on the device's default endpoint (the one group
+        // operations target): a change on a secondary endpoint must not rewrite
+        // or delete the device-level entry, since config can't represent it.
+        if (resolvedEndpoint.ID === resolvedDevice.endpoint("default")?.ID) {
+            settings.mutateBatched(() => {
+                for (const group of changedGroups) {
+                    if (type === "add") {
+                        settings.addGroupMember(resolvedDevice.ieeeAddr, group.name);
+                    } else {
+                        settings.removeGroupMember(resolvedDevice.ieeeAddr, group.name);
+                    }
                 }
-            }
-        });
+            });
+        }
 
         for (const group of changedGroups) {
             this.eventBus.emitGroupMembersChanged({group, action: type, endpoint: resolvedEndpoint, skipDisableReporting});
