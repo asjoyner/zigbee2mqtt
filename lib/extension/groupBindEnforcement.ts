@@ -88,7 +88,6 @@ export default class GroupBindEnforcement extends Extension {
         const interval = explicitCooldown && explicitCooldown > 0 ? explicitCooldown : GroupBindEnforcement.DEFAULT_POLL_INTERVAL;
         this.stats.poll_interval_min = interval;
 
-        this.eventBus.onGroupMembersChanged(this, this.onGroupMembersChanged);
         this.eventBus.onDeviceInterview(this, this.onDeviceInterview);
         logger.info(`Group/Bind Enforcement: Starting poll loop (interval: ${interval} min)`);
         await this.publishStats();
@@ -108,19 +107,6 @@ export default class GroupBindEnforcement extends Extension {
             this.pollTimer = undefined;
         }
         await super.stop();
-    }
-
-    @bind private async onGroupMembersChanged(data: eventdata.GroupMembersChanged): Promise<void> {
-        if (!this.pollTimer) return;
-
-        const device = this.zigbee.resolveEntity(data.endpoint.getDevice().ieeeAddr);
-        if (device && device instanceof Device) {
-            if (data.action === "add") {
-                settings.addGroupMember(device.ieeeAddr, data.group.name);
-            } else if (data.action === "remove") {
-                settings.removeGroupMember(device.ieeeAddr, data.group.name);
-            }
-        }
     }
 
     @bind private async onDeviceInterview(data: eventdata.DeviceInterview): Promise<void> {

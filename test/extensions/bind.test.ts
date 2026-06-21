@@ -875,4 +875,73 @@ describe("Extension: Bind", () => {
             {},
         );
     });
+
+    describe("Config persistence", () => {
+        it("Should persist a successful group bind to configuration.yaml", async () => {
+            const device = devices.remote;
+            mockClear(device);
+            expect(settings.getDevice("remote")!.binds).toBeUndefined();
+
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/bind", stringify({from: "remote", to: "group_1"}));
+            await flushPromises();
+
+            const binds = settings.getDevice("remote")!.binds;
+            expect(binds).toEqual([
+                {cluster: "genScenes", to: "group_1", to_endpoint: undefined, from_endpoint: 1},
+                {cluster: "genOnOff", to: "group_1", to_endpoint: undefined, from_endpoint: 1},
+                {cluster: "genLevelCtrl", to: "group_1", to_endpoint: undefined, from_endpoint: 1},
+            ]);
+        });
+
+        it("Should remove a persisted bind from configuration.yaml on unbind", async () => {
+            settings.addBinding("remote", "genOnOff", "group_1", undefined, 1);
+            settings.addBinding("remote", "genLevelCtrl", "group_1", undefined, 1);
+            expect(settings.getDevice("remote")!.binds).toHaveLength(2);
+
+            const device = devices.remote;
+            mockClear(device);
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/unbind", stringify({from: "remote", to: "group_1"}));
+            await flushPromises();
+
+            // genScenes is also unbound but was never persisted; the two
+            // persisted entries are gone, leaving no binds (key deleted).
+            expect(settings.getDevice("remote")!.binds).toBeUndefined();
+        });
+
+        it("Should persist the source endpoint a bind was made from", async () => {
+            const device = devices.remote;
+            mockClear(device);
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/bind", stringify({from: "remote", from_endpoint: 2, to: "group_1"}));
+            await flushPromises();
+
+            const binds = settings.getDevice("remote")!.binds!;
+            expect(binds.length).toBeGreaterThan(0);
+            for (const b of binds) {
+                expect(b.from_endpoint).toBe(2);
+            }
+        });
+
+        it("Should not persist binds to the coordinator (report-bindings)", async () => {
+            const device = devices.remote;
+            mockClear(device);
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/bind", stringify({from: "remote", to: "Coordinator", clusters: ["genOnOff"]}));
+            await flushPromises();
+
+            expect(settings.getDevice("remote")!.binds).toBeUndefined();
+        });
+
+        it("Should clear persisted binds when the binding table is cleared", async () => {
+            settings.addBinding("remote", "genOnOff", "group_1", undefined, 1);
+            settings.addBinding("remote", "genLevelCtrl", "group_1", undefined, 1);
+            expect(settings.getDevice("remote")!.binds).toHaveLength(2);
+
+            const device = devices.remote;
+            device.mockClear();
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/device/binds/clear", stringify({target: "remote"}));
+            await flushPromises();
+
+            expect(device.clearAllBindings).toHaveBeenCalledTimes(1);
+            expect(settings.getDevice("remote")!.binds).toBeUndefined();
+        });
+    });
 });

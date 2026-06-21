@@ -296,6 +296,20 @@ export default class Bind extends Extension {
 
             await target.zh.clearAllBindings(eui64List);
 
+            // Mirror the clear into configuration.yaml so the persisted binds
+            // don't survive and get re-applied. clearAllBindings wipes the
+            // device's binding table; config binds aren't tracked per-target,
+            // so we drop them all for this device — matching the "clear all"
+            // semantics of the frontend button.
+            const configuredBinds = target.options.binds;
+            if (configuredBinds && configuredBinds.length > 0) {
+                settings.mutateBatched(() => {
+                    for (const b of [...configuredBinds]) {
+                        settings.removeBinding(target.ieeeAddr, b.cluster, b.to, b.to_endpoint);
+                    }
+                });
+            }
+
             const responseData: Zigbee2MQTTAPI["bridge/response/device/binds/clear"] = {
                 target: message.target,
                 ieee_list: eui64List,
@@ -412,6 +426,32 @@ export default class Bind extends Extension {
             } else if (typeof resolvedBindTarget !== "number" && !skipDisableReporting) {
                 await this.disableUnnecessaryReportings(resolvedBindTarget);
             }
+        }
+
+        // Persist the change to configuration.yaml so it survives a restart
+        // and the group/bind enforcement poll, which would otherwise treat a
+        // UI-created bind as "unexpected on device" and remove it on the next
+        // cycle. Coordinator / default-bind-group targets are report-bindings
+        // managed by the configure extension and are intentionally excluded
+        // from config: the DEFAULT_BIND_GROUP literal is not a Group instance
+        // (so `instanceof` skips it) and we additionally skip Coordinator
+        // devices, mirroring isCoordinatorTarget in groupBindEnforcement.
+        if (
+            successfulClusters.length !== 0 &&
+            (resolvedTarget instanceof Group || (resolvedTarget instanceof Device && resolvedTarget.zh.type !== "Coordinator"))
+        ) {
+            const persistTarget = resolvedTarget.name;
+            const persistToEndpoint = utils.isZHEndpoint(resolvedBindTarget) ? resolvedBindTarget.ID : undefined;
+            const fromEndpoint = resolvedSourceEndpoint.ID;
+            settings.mutateBatched(() => {
+                for (const cluster of successfulClusters) {
+                    if (type === "bind") {
+                        settings.addBinding(resolvedSource.ieeeAddr, cluster, persistTarget, persistToEndpoint, fromEndpoint);
+                    } else {
+                        settings.removeBinding(resolvedSource.ieeeAddr, cluster, persistTarget, persistToEndpoint);
+                    }
+                }
+            });
         }
 
         await this.publishResponse(parsed.type, raw, responseData);

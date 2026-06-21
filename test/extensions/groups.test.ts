@@ -816,4 +816,38 @@ describe("Extension: Groups", () => {
             qos: 0,
         });
     });
+
+    describe("Config persistence", () => {
+        it("Should persist group membership to configuration.yaml on add", async () => {
+            expect(settings.getDevice("bulb_color")!.groups).toBeUndefined();
+
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/group/members/add", stringify({group: "group_1", device: "bulb_color"}));
+            await flushPromises();
+
+            expect(settings.getDevice("bulb_color")!.groups).toStrictEqual(["group_1"]);
+        });
+
+        it("Should remove group membership from configuration.yaml on remove", async () => {
+            settings.addGroupMember("bulb_color", "group_1");
+            expect(settings.getDevice("bulb_color")!.groups).toStrictEqual(["group_1"]);
+
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/group/members/remove", stringify({group: "group_1", device: "bulb_color"}));
+            await flushPromises();
+
+            expect(settings.getDevice("bulb_color")!.groups).toBeUndefined();
+        });
+
+        it("Should remove group membership from configuration.yaml on remove_all", async () => {
+            // Add via MQTT so the endpoint is a real member (remove_all only
+            // touches groups the endpoint actually belongs to).
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/group/members/add", stringify({group: "group_1", device: "bulb_color"}));
+            await flushPromises();
+            expect(settings.getDevice("bulb_color")!.groups).toStrictEqual(["group_1"]);
+
+            mockMQTTEvents.message("zigbee2mqtt/bridge/request/group/members/remove_all", stringify({device: "bulb_color"}));
+            await flushPromises();
+
+            expect(settings.getDevice("bulb_color")!.groups).toBeUndefined();
+        });
+    });
 });
