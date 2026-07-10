@@ -73,6 +73,16 @@ export default class SmartBulbMode extends Extension {
     // onPublishEntityState cheaply decide whether a device's state update
     // concerns a managed switch. Rebuilt on start and on group option changes.
     private controllingSwitchGroups = new Map<string, number[]>();
+    // `<base_topic>/<name>/set[/<attr>]` matcher (mirrors the Publish
+    // extension's topic parsing), compiled once on first use.
+    private setTopicRegex?: RegExp;
+
+    private setTopic(): RegExp {
+        if (this.setTopicRegex === undefined) {
+            this.setTopicRegex = new RegExp(`^${settings.get().mqtt.base_topic}/(?!bridge)(.+?)/set(?:/(.+))?$`);
+        }
+        return this.setTopicRegex;
+    }
 
     // Tied to group_bind_cooldown so operators don't need a second knob;
     // the two reconcilers conceptually run together. If a future use case
@@ -111,12 +121,16 @@ export default class SmartBulbMode extends Extension {
         // effect immediately rather than waiting for the next poll.
         this.eventBus.onEntityOptionsChanged(this, this.onEntityOptionsChanged);
 
-        // Adopt device-side smartBulbMode changes (UI/paddle/MQTT set on the
-        // controlling switch) back into the group's config, so an operator's
-        // change persists to configuration.yaml instead of being reverted by
-        // the reconciler on the next poll. Mirrors the group/bind extensions'
-        // "persist UI changes" behavior.
-        this.eventBus.onPublishEntityState(this, this.onPublishEntityState);
+        // Adopt a user's smartBulbMode change on a controlling switch back
+        // into the group's config, so it persists to configuration.yaml
+        // instead of being reverted by the reconciler on the next poll.
+        // Keyed on the MQTT `/set` command (the frontend/automation intent) —
+        // NOT on device state publishes. That deliberately distinguishes a
+        // user action from a device report: routine reports, interview reads
+        // after a re-pair, a corrupted/reset attribute, and the reconciler's
+        // own endpoint.write never arrive as a `/set`, so none of them mutate
+        // config (the reconciler restores config→device for those instead).
+        this.eventBus.onMQTTMessage(this, this.onMQTTMessage);
 
         await this.publishAllGroupStatus();
         // Jittered initial fire to avoid stampeding the network at boot.
@@ -134,7 +148,7 @@ export default class SmartBulbMode extends Extension {
         if (!changed) return;
 
         // controlling_switch may have moved to a different device; keep the
-        // reverse index used by onPublishEntityState in step.
+        // reverse index used by onMQTTMessage in step.
         this.rebuildControllingSwitchIndex();
 
         const groupOpts = settings.getGroup(data.entity.ID) as unknown as Zigbee2MQTTGroupOptions | undefined;
@@ -169,25 +183,48 @@ export default class SmartBulbMode extends Extension {
         }
     }
 
-    // When a controlling switch publishes a smartBulbMode that disagrees with
-    // its group's configured smart_bulb_mode, adopt the device's value into
-    // config. This makes a UI/paddle/MQTT change stick instead of being
-    // reverted by the reconciler. A device report surfacing mid-interview
-    // (e.g. a factory-reset default right after a re-pair) is ignored — the
-    // reconciler restores config→device in that case rather than the other way.
-    @bind private async onPublishEntityState(data: eventdata.PublishEntityState): Promise<void> {
-        const device = data.entity;
-        if (!(device instanceof Device)) return;
-        if (data.message[SMART_BULB_MODE_STATE_KEY] === undefined) return;
-        if (!device.interviewed) return;
+    // Persist a user's smartBulbMode `/set` on a controlling switch into its
+    // group's smart_bulb_mode. ONLY `/set` commands are honored: a device
+    // report (routine state, an interview read after a re-pair, or a
+    // corrupted/reset attribute) never arrives as a `/set`, so it can't
+    // rewrite config — the reconciler restores config→device for those. The
+    // `/set` itself drives the switch via the normal publish path, so here we
+    // only update config + status; no extra device write, and no config↔device
+    // race with the reconciler.
+    @bind private async onMQTTMessage(data: eventdata.MQTTMessage): Promise<void> {
+        const match = data.topic.match(this.setTopic());
+        if (!match) return;
+        const nameAndEndpoint = match[1];
+        const attribute = match[2];
 
-        const byIeee = this.controllingSwitchGroups.get(device.ieeeAddr) ?? [];
-        const byName = this.controllingSwitchGroups.get(device.name) ?? [];
-        const groupIds = byIeee.length || byName.length ? [...new Set([...byIeee, ...byName])] : [];
-        if (groupIds.length === 0) return;
+        // Pull the smartBulbMode value this /set applies: either the whole-JSON
+        // form `{smartBulbMode: X}` or the per-attribute topic `.../set/smartBulbMode`.
+        let raw: unknown;
+        if (attribute === SMART_BULB_MODE_STATE_KEY) {
+            raw = data.message;
+        } else if (attribute === undefined) {
+            let parsed: unknown;
+            try {
+                parsed = JSON.parse(data.message);
+            } catch {
+                return; // non-JSON bare /set → not a smartBulbMode change
+            }
+            if (!parsed || typeof parsed !== "object" || !(SMART_BULB_MODE_STATE_KEY in parsed)) return;
+            raw = (parsed as KeyValue)[SMART_BULB_MODE_STATE_KEY];
+        } else {
+            return; // a /set targeting some other single attribute
+        }
 
-        const desired = parseSmartBulbModeState(data.message[SMART_BULB_MODE_STATE_KEY]);
+        const desired = parseSmartBulbModeState(raw);
         if (desired === undefined) return;
+
+        const entity = this.zigbee.resolveEntityAndEndpoint(nameAndEndpoint).entity;
+        if (!(entity instanceof Device)) return;
+
+        const byIeee = this.controllingSwitchGroups.get(entity.ieeeAddr) ?? [];
+        const byName = this.controllingSwitchGroups.get(entity.name) ?? [];
+        const groupIds = [...new Set([...byIeee, ...byName])];
+        if (groupIds.length === 0) return;
 
         for (const groupId of groupIds) {
             const opts = settings.getGroup(groupId) as unknown as Zigbee2MQTTGroupOptions | undefined;
@@ -195,15 +232,14 @@ export default class SmartBulbMode extends Extension {
             if ((opts.smart_bulb_mode === true) === desired) continue; // already in sync
 
             const name = this.zigbee.groupByID(groupId)?.name ?? String(groupId);
-            logger.info(`Smart Bulb Mode [${name}]: adopting device-side change, persisting smart_bulb_mode=${desired} to configuration.yaml`);
+            logger.info(`Smart Bulb Mode [${name}]: persisting user smart_bulb_mode=${desired} (set on '${entity.name}') to configuration.yaml`);
             // Key by the group ID string: getGroup() resolves it via the config
             // ID map, so persistence doesn't depend on the zigbee group being
             // resolvable at this moment.
             settings.changeEntityOptions(String(groupId), {smart_bulb_mode: desired});
 
-            // Keep cached stats + the retained status topic in step with the
-            // change we just adopted; no device write is needed since the
-            // device already holds the new value.
+            // The /set already drives the switch; just keep cached stats + the
+            // retained status topic current.
             const stats = this.groupStats.get(groupId);
             if (stats) {
                 stats.desired = desired ? "on" : "off";

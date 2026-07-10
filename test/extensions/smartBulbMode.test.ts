@@ -7,7 +7,6 @@ import {devices, resetGroupMembers} from "../mocks/zigbeeHerdsman";
 
 import {Controller} from "../../lib/controller";
 import {parseSmartBulbModeState} from "../../lib/extension/smartBulbMode";
-import type Device from "../../lib/model/device";
 import * as settings from "../../lib/util/settings";
 
 describe("Extension: SmartBulbMode", () => {
@@ -25,11 +24,11 @@ describe("Extension: SmartBulbMode", () => {
         });
     });
 
-    describe("adopting device-side changes into config", () => {
+    describe("adopting a user /set into config", () => {
         let controller: Controller;
-        const switchIeee = devices.bulb_color.ieeeAddr; // any configured, interviewed device; the handler is cluster-agnostic
-
-        const state = (message: KeyValue, entity: Device) => ({entity, message, payload: message}) as never;
+        // Any configured, resolvable device works — the handler keys on the
+        // MQTT `/set` topic + payload, not on the device's cluster.
+        const switchName = "bulb_color";
 
         beforeAll(async () => {
             controller = new Controller(vi.fn(), vi.fn());
@@ -47,89 +46,71 @@ describe("Extension: SmartBulbMode", () => {
             settings.reRead();
             mockLogger.info.mockClear();
             // Make group_1 a smart-bulb-managed group driven by the controlling switch.
-            settings.set(["groups", "1", "controlling_switch"], switchIeee);
+            settings.set(["groups", "1", "controlling_switch"], devices.bulb_color.ieeeAddr);
             settings.set(["groups", "1", "smart_bulb_mode"], false);
         });
 
         const getExt = () =>
             controller.getExtension("SmartBulbMode") as never as {
                 rebuildControllingSwitchIndex: () => void;
-                onPublishEntityState: (data: unknown) => Promise<void>;
+                onMQTTMessage: (data: {topic: string; message: string}) => Promise<void>;
             };
+
+        const set = async (topic: string, message: string) => {
+            const ext = getExt();
+            ext.rebuildControllingSwitchIndex();
+            await ext.onMQTTMessage({topic, message});
+            await flushPromises();
+        };
 
         const sbm = (id: number) => (settings.getGroup(id) as unknown as {smart_bulb_mode?: boolean}).smart_bulb_mode;
 
-        it("persists a UI/device smartBulbMode change to the group's smart_bulb_mode", async () => {
-            const ext = getExt();
-            ext.rebuildControllingSwitchIndex();
-            const device = controller.zigbee.resolveEntity(switchIeee) as Device;
-
-            await ext.onPublishEntityState(state({smartBulbMode: "Smart Bulb Mode"}, device));
-            await flushPromises();
-
+        it("persists a whole-JSON /set of smartBulbMode", async () => {
+            await set(`zigbee2mqtt/${switchName}/set`, JSON.stringify({smartBulbMode: "Smart Bulb Mode"}));
             expect(sbm(1)).toBe(true);
         });
 
-        it("persists a turn-off the same way", async () => {
+        it("persists a per-attribute /set/smartBulbMode (turn off)", async () => {
             settings.set(["groups", "1", "smart_bulb_mode"], true);
-            const ext = getExt();
-            ext.rebuildControllingSwitchIndex();
-            const device = controller.zigbee.resolveEntity(switchIeee) as Device;
-
-            await ext.onPublishEntityState(state({smartBulbMode: "Disabled"}, device));
-            await flushPromises();
-
+            await set(`zigbee2mqtt/${switchName}/set/smartBulbMode`, "Disabled");
             expect(sbm(1)).toBe(false);
         });
 
         it("does not write config when already in sync", async () => {
             settings.set(["groups", "1", "smart_bulb_mode"], true);
-            const ext = getExt();
-            ext.rebuildControllingSwitchIndex();
             const spy = vi.spyOn(settings, "changeEntityOptions");
-            const device = controller.zigbee.resolveEntity(switchIeee) as Device;
-
-            await ext.onPublishEntityState(state({smartBulbMode: "Smart Bulb Mode"}, device));
-            await flushPromises();
-
+            await set(`zigbee2mqtt/${switchName}/set`, JSON.stringify({smartBulbMode: "Smart Bulb Mode"}));
             expect(spy).not.toHaveBeenCalled();
             spy.mockRestore();
         });
 
-        it("ignores reports while the device is mid-interview (re-pair guard)", async () => {
-            const ext = getExt();
-            ext.rebuildControllingSwitchIndex();
-            const device = controller.zigbee.resolveEntity(switchIeee) as Device;
-            const interviewed = vi.spyOn(device, "interviewed", "get").mockReturnValue(false);
-
-            await ext.onPublishEntityState(state({smartBulbMode: "Smart Bulb Mode"}, device));
-            await flushPromises();
-
-            expect(sbm(1)).toBe(false);
-            interviewed.mockRestore();
-        });
-
-        it("ignores devices that are not a controlling switch", async () => {
-            const ext = getExt();
-            ext.rebuildControllingSwitchIndex();
-            const other = controller.zigbee.resolveEntity(devices.bulb.ieeeAddr) as Device;
-
-            await ext.onPublishEntityState(state({smartBulbMode: "Smart Bulb Mode"}, other));
-            await flushPromises();
-
-            expect(sbm(1)).toBe(false);
-        });
-
-        it("ignores state updates that don't carry smartBulbMode", async () => {
-            const ext = getExt();
-            ext.rebuildControllingSwitchIndex();
+        it("ignores a /set that doesn't touch smartBulbMode", async () => {
             const spy = vi.spyOn(settings, "changeEntityOptions");
-            const device = controller.zigbee.resolveEntity(switchIeee) as Device;
-
-            await ext.onPublishEntityState(state({state: "ON"}, device));
-            await flushPromises();
-
+            await set(`zigbee2mqtt/${switchName}/set`, JSON.stringify({state: "ON"}));
             expect(spy).not.toHaveBeenCalled();
+            expect(sbm(1)).toBe(false);
+            spy.mockRestore();
+        });
+
+        it("ignores a /set on a device that is not a controlling switch", async () => {
+            await set("zigbee2mqtt/bulb/set", JSON.stringify({smartBulbMode: "Smart Bulb Mode"}));
+            expect(sbm(1)).toBe(false);
+        });
+
+        it("ignores non-/set topics (e.g. /get) — device reports never adopt", async () => {
+            const spy = vi.spyOn(settings, "changeEntityOptions");
+            await set(`zigbee2mqtt/${switchName}/get`, JSON.stringify({smartBulbMode: ""}));
+            await set(`zigbee2mqtt/${switchName}`, JSON.stringify({smartBulbMode: "Smart Bulb Mode"}));
+            expect(spy).not.toHaveBeenCalled();
+            expect(sbm(1)).toBe(false);
+            spy.mockRestore();
+        });
+
+        it("ignores an unrecognized (corrupted) smartBulbMode value", async () => {
+            const spy = vi.spyOn(settings, "changeEntityOptions");
+            await set(`zigbee2mqtt/${switchName}/set/smartBulbMode`, "garbage");
+            expect(spy).not.toHaveBeenCalled();
+            expect(sbm(1)).toBe(false);
             spy.mockRestore();
         });
     });
