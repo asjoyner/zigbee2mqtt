@@ -36,6 +36,24 @@ const SMART_BULB_MODE_ATTR = "smartBulbMode";
 const SMART_BULB_MODE_ON = 1;
 const SMART_BULB_MODE_OFF = 0;
 
+// Key under which the smartBulbMode enum is published in a device's state
+// (the Inovelli expose name). Published values are the enum labels
+// "Disabled" | "Smart Bulb Mode"; we also accept the raw 0/1 / boolean forms
+// defensively. Used to adopt a UI/paddle change back into the group config.
+const SMART_BULB_MODE_STATE_KEY = "smartBulbMode";
+
+// Map a published smartBulbMode value to a desired boolean, or undefined if
+// it isn't a value we recognize (leave config untouched in that case).
+export function parseSmartBulbModeState(v: unknown): boolean | undefined {
+    if (typeof v === "boolean") return v;
+    if (typeof v === "number") return v === SMART_BULB_MODE_ON ? true : v === SMART_BULB_MODE_OFF ? false : undefined;
+    if (typeof v === "string") {
+        if (v === "Smart Bulb Mode") return true;
+        if (v === "Disabled") return false;
+    }
+    return undefined;
+}
+
 type SmartBulbModeStatus = "on" | "off" | "unknown";
 
 interface PerGroupStats {
@@ -50,6 +68,11 @@ interface PerGroupStats {
 export default class SmartBulbMode extends Extension {
     private pollTimer?: ReturnType<typeof setTimeout>;
     private groupStats = new Map<number, PerGroupStats>();
+    // Reverse index: configured controlling_switch value (ieee address or
+    // friendly_name, as written in config) → group IDs it controls. Lets
+    // onPublishEntityState cheaply decide whether a device's state update
+    // concerns a managed switch. Rebuilt on start and on group option changes.
+    private controllingSwitchGroups = new Map<string, number[]>();
 
     // Tied to group_bind_cooldown so operators don't need a second knob;
     // the two reconcilers conceptually run together. If a future use case
@@ -81,10 +104,19 @@ export default class SmartBulbMode extends Extension {
         const interval = this.getPollIntervalMinutes() || 10;
         logger.info(`Smart Bulb Mode: starting reconciler (interval: ${interval} min)`);
 
+        this.rebuildControllingSwitchIndex();
+
         // Listen for group option changes so toggling smart_bulb_mode (via
         // bridge/request/group/options or a configuration.yaml edit) takes
         // effect immediately rather than waiting for the next poll.
         this.eventBus.onEntityOptionsChanged(this, this.onEntityOptionsChanged);
+
+        // Adopt device-side smartBulbMode changes (UI/paddle/MQTT set on the
+        // controlling switch) back into the group's config, so an operator's
+        // change persists to configuration.yaml instead of being reverted by
+        // the reconciler on the next poll. Mirrors the group/bind extensions'
+        // "persist UI changes" behavior.
+        this.eventBus.onPublishEntityState(this, this.onPublishEntityState);
 
         await this.publishAllGroupStatus();
         // Jittered initial fire to avoid stampeding the network at boot.
@@ -101,6 +133,10 @@ export default class SmartBulbMode extends Extension {
             before.smart_bulb_mode !== after.smart_bulb_mode;
         if (!changed) return;
 
+        // controlling_switch may have moved to a different device; keep the
+        // reverse index used by onPublishEntityState in step.
+        this.rebuildControllingSwitchIndex();
+
         const groupOpts = settings.getGroup(data.entity.ID) as unknown as Zigbee2MQTTGroupOptions | undefined;
         if (!groupOpts) return;
 
@@ -115,6 +151,68 @@ export default class SmartBulbMode extends Extension {
         await this.reconcileGroup(data.entity, groupOpts);
         const stats = this.groupStats.get(data.entity.ID);
         if (stats) await this.publishGroupStatus(stats);
+    }
+
+    // Rebuild the controlling_switch → groupIds reverse index from config.
+    private rebuildControllingSwitchIndex(): void {
+        this.controllingSwitchGroups.clear();
+        const groups = settings.get().groups ?? {};
+        for (const [idStr, opts] of Object.entries(groups)) {
+            const groupId = Number(idStr);
+            if (Number.isNaN(groupId)) continue;
+            const cs = (opts as Zigbee2MQTTGroupOptions).controlling_switch;
+            if (cs === undefined) continue;
+            const key = cs.toString();
+            const list = this.controllingSwitchGroups.get(key) ?? [];
+            list.push(groupId);
+            this.controllingSwitchGroups.set(key, list);
+        }
+    }
+
+    // When a controlling switch publishes a smartBulbMode that disagrees with
+    // its group's configured smart_bulb_mode, adopt the device's value into
+    // config. This makes a UI/paddle/MQTT change stick instead of being
+    // reverted by the reconciler. A device report surfacing mid-interview
+    // (e.g. a factory-reset default right after a re-pair) is ignored — the
+    // reconciler restores config→device in that case rather than the other way.
+    @bind private async onPublishEntityState(data: eventdata.PublishEntityState): Promise<void> {
+        const device = data.entity;
+        if (!(device instanceof Device)) return;
+        if (data.message[SMART_BULB_MODE_STATE_KEY] === undefined) return;
+        if (!device.interviewed) return;
+
+        const byIeee = this.controllingSwitchGroups.get(device.ieeeAddr) ?? [];
+        const byName = this.controllingSwitchGroups.get(device.name) ?? [];
+        const groupIds = byIeee.length || byName.length ? [...new Set([...byIeee, ...byName])] : [];
+        if (groupIds.length === 0) return;
+
+        const desired = parseSmartBulbModeState(data.message[SMART_BULB_MODE_STATE_KEY]);
+        if (desired === undefined) return;
+
+        for (const groupId of groupIds) {
+            const opts = settings.getGroup(groupId) as unknown as Zigbee2MQTTGroupOptions | undefined;
+            if (!opts || opts.controlling_switch === undefined) continue;
+            if ((opts.smart_bulb_mode === true) === desired) continue; // already in sync
+
+            const name = this.zigbee.groupByID(groupId)?.name ?? String(groupId);
+            logger.info(`Smart Bulb Mode [${name}]: adopting device-side change, persisting smart_bulb_mode=${desired} to configuration.yaml`);
+            // Key by the group ID string: getGroup() resolves it via the config
+            // ID map, so persistence doesn't depend on the zigbee group being
+            // resolvable at this moment.
+            settings.changeEntityOptions(String(groupId), {smart_bulb_mode: desired});
+
+            // Keep cached stats + the retained status topic in step with the
+            // change we just adopted; no device write is needed since the
+            // device already holds the new value.
+            const stats = this.groupStats.get(groupId);
+            if (stats) {
+                stats.desired = desired ? "on" : "off";
+                stats.actual = desired ? "on" : "off";
+                stats.last_reconciled = new Date().toISOString();
+                stats.last_error = undefined;
+                await this.publishGroupStatus(stats);
+            }
+        }
     }
 
     override async stop(): Promise<void> {
