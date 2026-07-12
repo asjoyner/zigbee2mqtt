@@ -12,11 +12,22 @@ import Extension from "./extension";
 //
 // Pairs with GroupBindEnforcement: this extension does NOT manage the
 // paddle-scene → bulb-group bindings (those live in the device's `binds`
-// config and are enforced by GroupBindEnforcement). It only manages the
-// switch-side state needed for the group's bulbs to be reachable:
-//   - smartBulbMode attribute on the controlling switch
-//   - relay state (the switch's onOff state) when smart_bulb_mode is on,
-//     so the bulbs stay energized
+// config and are enforced by GroupBindEnforcement). It manages exactly one
+// thing on the controlling switch:
+//   - the smartBulbMode attribute
+//
+// It deliberately does NOT touch the switch's onOff state. On a VZM31-SN,
+// enabling smart bulb mode makes the firmware hold the load energized
+// unconditionally — that IS the mode. The genOnOff attribute is then a
+// *logical* state, not a relay position, and its transitions are emitted to
+// whatever the switch's binding endpoint is bound to (typically the bulb
+// group itself, cluster 6/8 from endpoint 2). So writing genOnOff on the
+// controlling switch does not "re-energize the bulbs" — it broadcasts an ON
+// to the bound group, turning the room on. An earlier version of this
+// extension forced onOff=1 on every poll to "keep the bulbs powered"; paired
+// with any external automation that turns the group off, that produced an
+// endless off/on fight at the poll interval. Reconcile the attribute; leave
+// switching to the user and their automations.
 //
 // Configuration lives on the group:
 //
@@ -33,8 +44,8 @@ const INOVELLI_CLUSTER_NAME = "manuSpecificInovelli";
 const INOVELLI_MANUFACTURER_CODE = 0x122f;
 const SMART_BULB_MODE_ATTR = "smartBulbMode";
 // 0=Disabled, 1=Smart Bulb Mode (per the device's BOOLEAN encoding).
-const SMART_BULB_MODE_ON = 1;
-const SMART_BULB_MODE_OFF = 0;
+export const SMART_BULB_MODE_ON = 1;
+export const SMART_BULB_MODE_OFF = 0;
 
 // Key under which the smartBulbMode enum is published in a device's state
 // (the Inovelli expose name). Published values are the enum labels
@@ -103,9 +114,7 @@ export default class SmartBulbMode extends Extension {
             }
         }
         const groups = settings.get().groups ?? {};
-        return Object.values(groups).some(
-            (g) => (g as Zigbee2MQTTGroupOptions).controlling_switch !== undefined,
-        );
+        return Object.values(groups).some((g) => (g as Zigbee2MQTTGroupOptions).controlling_switch !== undefined);
     }
 
     override async start(): Promise<void> {
@@ -142,9 +151,7 @@ export default class SmartBulbMode extends Extension {
         if (!(data.entity instanceof Group)) return;
         const before = data.from ?? {};
         const after = data.to ?? {};
-        const changed =
-            before.controlling_switch !== after.controlling_switch ||
-            before.smart_bulb_mode !== after.smart_bulb_mode;
+        const changed = before.controlling_switch !== after.controlling_switch || before.smart_bulb_mode !== after.smart_bulb_mode;
         if (!changed) return;
 
         // controlling_switch may have moved to a different device; keep the
@@ -336,10 +343,9 @@ export default class SmartBulbMode extends Extension {
                 if (typeof cached === "number") {
                     currentValue = cached;
                 } else {
-                    const read = (await endpoint.read(
-                        INOVELLI_CLUSTER_NAME,
-                        [SMART_BULB_MODE_ATTR] as unknown as Parameters<typeof endpoint.read>[1],
-                    )) as Record<string, unknown>;
+                    const read = (await endpoint.read(INOVELLI_CLUSTER_NAME, [SMART_BULB_MODE_ATTR] as unknown as Parameters<
+                        typeof endpoint.read
+                    >[1])) as Record<string, unknown>;
                     const v = read[SMART_BULB_MODE_ATTR];
                     if (typeof v === "number") currentValue = v;
                 }
@@ -363,11 +369,9 @@ export default class SmartBulbMode extends Extension {
                     // cast keeps the literal `smartBulbMode` key while
                     // satisfying the compiler. Matches the pattern used in
                     // the Inovelli converter (tzLocal in lib/inovelli.js).
-                    await endpoint.write(
-                        INOVELLI_CLUSTER_NAME,
-                        {smartBulbMode: desiredValue} as unknown as Parameters<typeof endpoint.write>[1],
-                        {manufacturerCode: INOVELLI_MANUFACTURER_CODE},
-                    );
+                    await endpoint.write(INOVELLI_CLUSTER_NAME, {smartBulbMode: desiredValue} as unknown as Parameters<typeof endpoint.write>[1], {
+                        manufacturerCode: INOVELLI_MANUFACTURER_CODE,
+                    });
                     stats.actual = desired;
                 } catch (err) {
                     stats.last_error = `write failed: ${(err as Error).message}`;
@@ -376,24 +380,10 @@ export default class SmartBulbMode extends Extension {
                 }
             }
 
-            // When smart_bulb_mode is on, hold the relay closed so the bulbs
-            // stay energized. Idempotent: only fire if the switch's onOff
-            // state is currently off.
-            if (desired === "on") {
-                try {
-                    const onOff = endpoint.getClusterAttributeValue("genOnOff", "onOff");
-                    if (onOff !== 1) {
-                        logger.info(`Smart Bulb Mode [${group.name}]: forcing relay on for '${device.name}'`);
-                        await endpoint.command("genOnOff", "on", {});
-                    }
-                } catch (err) {
-                    // Relay enforcement is best-effort — log but don't fail
-                    // the reconcile. smartBulbMode being set is the
-                    // load-bearing change; the relay forced-on is a
-                    // nice-to-have to recover from a manual flip-down.
-                    logger.debug(`Smart Bulb Mode [${group.name}]: relay-on check failed: ${(err as Error).message}`);
-                }
-            }
+            // NOTE: no onOff enforcement here, by design. See the header
+            // comment — on a smart-bulb-mode switch the relay is already held
+            // closed by firmware, and writing genOnOff would broadcast an ON
+            // to the switch's bound group rather than restore power.
 
             stats.last_reconciled = new Date().toISOString();
             stats.last_error = undefined;
