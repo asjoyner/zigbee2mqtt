@@ -6,7 +6,7 @@ import {flushPromises} from "../mocks/utils";
 import {devices, resetGroupMembers} from "../mocks/zigbeeHerdsman";
 
 import {Controller} from "../../lib/controller";
-import {parseSmartBulbModeState} from "../../lib/extension/smartBulbMode";
+import {parseSmartBulbModeState, SMART_BULB_MODE_OFF, SMART_BULB_MODE_ON} from "../../lib/extension/smartBulbMode";
 import * as settings from "../../lib/util/settings";
 
 describe("Extension: SmartBulbMode", () => {
@@ -112,6 +112,84 @@ describe("Extension: SmartBulbMode", () => {
             expect(spy).not.toHaveBeenCalled();
             expect(sbm(1)).toBe(false);
             spy.mockRestore();
+        });
+    });
+
+    describe("reconcileGroup", () => {
+        let controller: Controller;
+
+        beforeAll(async () => {
+            controller = new Controller(vi.fn(), vi.fn());
+            await controller.start();
+            await flushPromises();
+        });
+
+        afterAll(async () => {
+            await controller?.stop();
+        });
+
+        beforeEach(() => {
+            resetGroupMembers();
+            data.writeDefaultConfiguration();
+            settings.reRead();
+            mockLogger.info.mockClear();
+        });
+
+        // The Inovelli manuSpecific cluster is registered at runtime via
+        // deviceAddCustomCluster, so it isn't in the mock's cluster table.
+        // Stub the endpoint surface the extension actually touches.
+        const stubSwitch = (cachedMode: number | undefined) => {
+            // biome-ignore lint/suspicious/noExplicitAny: reaching into controller internals for a focused unit test
+            const zigbee = (controller as any).zigbee;
+            const device = zigbee.resolveEntity(devices.bulb_color.ieeeAddr);
+            const ep = device.zh.endpoints[0];
+            ep.supportsInputCluster = vi.fn((c: string) => c === "manuSpecificInovelli");
+            ep.getClusterAttributeValue = vi.fn((cluster: string) => (cluster === "manuSpecificInovelli" ? cachedMode : 0));
+            ep.write = vi.fn(async () => {});
+            ep.command = vi.fn(async () => {});
+            return {ep, group: zigbee.groupByID(1)};
+        };
+
+        const reconcile = async (group: unknown, smartBulbMode: boolean) => {
+            // biome-ignore lint/suspicious/noExplicitAny: same
+            const ext = controller.getExtension("SmartBulbMode") as any;
+            await ext.reconcileGroup(group, {
+                controlling_switch: devices.bulb_color.ieeeAddr,
+                smart_bulb_mode: smartBulbMode,
+            });
+            await flushPromises();
+        };
+
+        it("writes the smartBulbMode attribute when the device is out of sync", async () => {
+            const {ep, group} = stubSwitch(SMART_BULB_MODE_OFF);
+            await reconcile(group, true);
+            expect(ep.write).toHaveBeenCalledWith("manuSpecificInovelli", {smartBulbMode: SMART_BULB_MODE_ON}, expect.anything());
+        });
+
+        it("does not write the attribute when the device already matches", async () => {
+            const {ep, group} = stubSwitch(SMART_BULB_MODE_ON);
+            await reconcile(group, true);
+            expect(ep.write).not.toHaveBeenCalled();
+        });
+
+        // Regression: the reconciler used to force onOff=1 on the controlling
+        // switch to "keep the bulbs energized". On a switch in smart bulb mode
+        // the relay is already held closed by firmware, and genOnOff is a
+        // logical state whose transitions are emitted to the switch's bound
+        // group — so that write broadcast an ON to the whole room. Paired with
+        // any automation that turns the group off, it produced an endless
+        // off/on fight at the poll interval. The reconciler must never issue a
+        // switching command.
+        it("never sends a genOnOff command, even when the switch reads off", async () => {
+            const {ep, group} = stubSwitch(SMART_BULB_MODE_OFF);
+            await reconcile(group, true);
+            expect(ep.command).not.toHaveBeenCalled();
+        });
+
+        it("never sends a genOnOff command when already in smart bulb mode", async () => {
+            const {ep, group} = stubSwitch(SMART_BULB_MODE_ON);
+            await reconcile(group, true);
+            expect(ep.command).not.toHaveBeenCalled();
         });
     });
 });
